@@ -74,6 +74,15 @@ class LoginFlow
     {
         $loginHelper = new LoginOperator($serverDB);
         $handshake = $loginHelper->insertHandshake($uid, false);
+        //ServerDB connects with PDO's default ERRMODE_SILENT, so a failed insert
+        //returns quietly. Without this check the player would be handed a
+        //handshake URL that the game rejects, with nothing logged anywhere.
+        $stmt = $serverDB->prepare('SELECT COUNT(*) FROM login_handshake WHERE token = :token');
+        $stmt->bindValue('token', sha1($handshake), PDO::PARAM_STR);
+        $stmt->execute();
+        if ((int)$stmt->fetchColumn() < 1) {
+            throw new RuntimeException('Could not open a session in the game world. Please try again.');
+        }
         return rtrim($server['gameWorldUrl'], '/') . '/login.php?detectLang&lowRes=0&handshake=' . $handshake;
     }
 

@@ -70,7 +70,9 @@ services:
       TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET:-}
       KICK_CLIENT_ID: ${KICK_CLIENT_ID:-}
       KICK_CLIENT_SECRET: ${KICK_CLIENT_SECRET:-}
-      COINS_API_TOKEN: ${COINS_API_TOKEN:-}
+      BOT_API_URL: ${BOT_API_URL:-}
+      BOT_INTERNAL_KEY: ${BOT_INTERNAL_KEY:-}
+      BOT_CHANNEL_NAME: ${BOT_CHANNEL_NAME:-}
     volumes:
       - ./:/travian
     depends_on:

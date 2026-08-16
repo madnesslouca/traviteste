@@ -182,39 +182,12 @@ class IdentityRepository
     }
 
     // ---------------------------------------------------------------- economy
-
-    public function getBalance($identityId)
-    {
-        $stmt = $this->db->prepare(
-            'SELECT COALESCE(SUM(amount), 0)::BIGINT AS balance FROM coin_ledger WHERE identity_id = :id'
-        );
-        $stmt->execute(['id' => $identityId]);
-        return (int)$stmt->fetchColumn();
-    }
-
-    /**
-     * Adds a ledger entry. $reference makes the write idempotent, which is what
-     * keeps a retried watch-time credit from minting currency twice.
-     *
-     * @return bool false when the reference was already recorded
-     */
-    public function addCoins($identityId, $amount, $reason, $reference = null)
-    {
-        if ($amount == 0) {
-            return false;
-        }
-        $stmt = $this->db->prepare(
-            'INSERT INTO coin_ledger (identity_id, amount, reason, reference)
-             VALUES (:id, :amount, :reason, :reference)
-             ON CONFLICT DO NOTHING
-             RETURNING id'
-        );
-        $stmt->execute([
-            'id'        => $identityId,
-            'amount'    => $amount,
-            'reason'    => $reason,
-            'reference' => $reference,
-        ]);
-        return $stmt->fetch() !== false;
-    }
+    //
+    // There is none here, on purpose. The stream bot owns the watch-time points:
+    // it credits them, debits purchases and records redemptions, atomically and
+    // in one place. A balance kept on this side would be a second answer to the
+    // same question, and the two would drift.
+    //
+    // Balances come from Core\Bot\BotClient; what this side owns is the delivery
+    // of gold, in Core\Shop\RedemptionConsumer.
 }

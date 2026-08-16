@@ -70,67 +70,66 @@ that handshake.
 
 ## Coins and the shop
 
-Coins live in PostgreSQL, gold lives in the game's MariaDB.
+Watch-time points belong to the stream bot. It credits them, debits purchases and
+records redemptions — atomically, in one place. This side never holds a balance:
+a second ledger would be a second answer to "how many points does this person
+have", and the two would drift.
 
-**Crediting coins** — this is where your watch-time system pays into the economy:
+What this side owns is **delivery**: turning a redemption into in-game gold.
 
-```bash
-curl -X POST http://localhost:8080/v1/coins/credit \
-  -H "Authorization: Bearer $COINS_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "provider": "twitch",
-        "provider_user_id": "123456",
-        "provider_login": "someviewer",
-        "amount": 500,
-        "reference": "watch:2026-08-09T13:00"
-      }'
+```
+bot's web store  → purchase → redemption pending ─┐
+                                                   ├→ this side credits gold,
+in-game shop     → purchase → redemption pending ─┘   marks it fulfilled
 ```
 
-`reference` makes the call idempotent: replaying it returns `duplicate: true` and
-credits nothing. Retry freely. An identity is created on first credit, so viewers
-can bank coins long before they ever open the game.
-
-`POST /v1/coins/balance` returns the current balance for a provider account.
-
-**Spending them** happens at `/shop/`. Prices live in `identity.shop_packages` and
-are edited with SQL, not code.
-
-### Why exchanges are orders
-
-The debit (PostgreSQL) and the credit (MariaDB) cannot share a transaction. Every
-exchange is therefore written down as an order that moves `pending → fulfilled`,
-or `pending → refunded` when the game cannot be credited — in which case the coins
-are returned by a compensating ledger entry.
-
-Balances are the **sum of a ledger**, never a mutable counter, so you can always
-answer where a coin came from.
-
-The order's reference is also written into the game database, in the same
-transaction as the gold. That makes a credit idempotent, and it makes an
-interrupted order *knowable* rather than a guess: if the game holds the
-reference, the player was paid.
+Both routes end the same way, so there is one delivery path, not two. Buying
+in-game delivers immediately; anything else is picked up by the consumer:
 
 ```bash
-# settle orders stranded by a crash mid-exchange
-docker compose run --rm -T php php /travian/tools/reconcile_orders.php --dry-run
-docker compose run --rm -T php php /travian/tools/reconcile_orders.php
+docker compose run --rm -T php php /travian/tools/deliver_redemptions.php
+docker compose run --rm -T php php /travian/tools/deliver_redemptions.php --loop=30
 ```
 
-Orders younger than the grace period (`--age`, 300s by default) are left alone,
-so it is safe to run while the shop is live. Anything it cannot decide stays
-pending and the command exits non-zero — a stuck order is recoverable, a wrongly
-settled one is not.
+Point it at your bot in `.env`:
+
+```
+BOT_API_URL=http://otakudotts-bot:8765
+BOT_INTERNAL_KEY=...        # the bot's internal key, never sent to a browser
+BOT_CHANNEL_NAME=yourchannel
+```
+
+### How much gold is an item worth
+
+The bot's store items carry a name and a price in points, but no quantity, so the
+payout lives here in `identity.gold_items`. Create the items in the bot's store as
+usual, then map them:
+
+```sql
+INSERT INTO identity.gold_items (channel_name, bot_item_id, gold_amount, label)
+VALUES ('yourchannel', 42, 50, 'Small chest');
+```
+
+Redemptions for items with no mapping are left alone — they are the streamer's own
+rewards, not ours to deliver.
+
+### Matching the player
+
+A redemption is matched on `platform` + `platform_user_id`, never on the name. A
+Twitch login that changes hands must not collect the previous owner's gold, so a
+redemption without a stable id is queued as `unmatched` rather than guessed at.
+Unmatched rows sit in `identity.redemption_deliveries` for a human to look at.
+
+Gold is credited exactly once, guarded by a unique reference in the game database
+— running the consumer twice, or concurrently, cannot pay twice.
 
 ```bash
 docker compose run --rm -T php php /travian/tools/test_shop.php
 docker compose run --rm -T php php /travian/tools/test_oauth.php
 ```
 
-Those exercise refusal, purchase, refund and reconciliation, and the sign-in flow
-(PKCE, single-use state, registration, handshake) against the real databases.
-
----
+Those cover delivery, double-delivery, unmatched viewers, refusal to match by
+name, and the sign-in flow (PKCE, single-use state, registration, handshake).
 
 ## Layout
 
@@ -138,17 +137,18 @@ Those exercise refusal, purchase, refund and reconciliation, and the sign-in flo
 main_script/        the game (MariaDB, mysqli)
 sections/api/       lobby API, OAuth, shop (PostgreSQL, PDO)
   include/Core/OAuth/    providers, login flow, redirector
-  include/Core/Shop/     coin -> gold exchange
-  include/Core/Coins/    server-to-server coin API
+  include/Core/Bot/      client for the stream bot's internal store API
+  include/Core/Shop/     redemption -> gold delivery
 docker/             images and database bootstrap
-tools/              install.sh, engine.php, test_shop.php
+tools/              install.sh, engine.php, deliver_redemptions.php, tests
 ```
 
 Two databases, on purpose:
 
 - **MariaDB** holds world state and stays an internal detail of the game.
-- **PostgreSQL** holds identities, watch-time coins and the ledger. It survives a
-  world being wiped and reinstalled, and the schema is confined to `identity`, so
+- **PostgreSQL** holds identities, the gold-item mapping and the delivery record
+  (not a coin balance — the bot owns that). It survives a world being wiped and
+  reinstalled, and the schema is confined to `identity`, so
   it drops into a database that already holds other tables. Point `IDENTITY_DB_*`
   at your own instance and stop the bundled `identity_db` service.
 
@@ -163,7 +163,8 @@ while it is down**: no buildings finish, no troops move.
 
 - The token exchange and profile parsing have not been exercised against live
   Twitch/Kick credentials. Everything after the profile is covered by tests.
-- Reconciliation is a command, not a scheduled job; nothing runs it for you.
+- Redemption delivery is a command, not a scheduled job; nothing runs it for you
+  unless you keep `--loop` running.
 - The shop has no link from inside the game, and there is no logout.
 - The admin panel's "install new server" flow assumes a VPS with systemd and
   Cloudflare DNS; it does not work under Docker. Use `tools/install.sh`.

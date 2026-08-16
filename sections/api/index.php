@@ -86,81 +86,108 @@ function handle_login_page()
 }
 
 /**
- * Server-to-server coin API, authenticated with a shared token rather than a
- * user session: the caller is the watch-time system, not a browser.
+ * The signed-in viewer, as the bot needs to be told about them.
+ *
+ * @return array|null ['identity_id','platform','platform_user_id','user_name']
  */
-function handle_coins_api($action)
+function shop_current_viewer()
 {
-    header('Content-Type: application/json');
-    try {
-        Core\Coins\CoinsApi::assertAuthorised();
-        $payload = json_decode(file_get_contents('php://input'), true);
-        if (!is_array($payload)) {
-            throw new RuntimeException('Request body must be a JSON object.');
-        }
-        $api = new Core\Coins\CoinsApi();
-        if (!in_array($action, ['credit', 'balance'], true)) {
-            throw new RuntimeException('Unknown action.');
-        }
-        echo json_encode(['success' => true, 'data' => $api->$action($payload)]);
-    } catch (Throwable $e) {
-        //401 only for the token itself; a bad payload is the caller's mistake,
-        //not an authentication problem.
-        http_response_code($e->getMessage() === 'Unauthorised.' ? 401 : 400);
-        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    $identityId = Core\OAuth\Redirector::currentIdentityId();
+    if (!$identityId) {
+        return null;
     }
-    exit();
+    $stmt = Database\IdentityDB::getInstance()->prepare(
+        'SELECT id, provider, provider_user_id, provider_login FROM oauth_identities WHERE id = :id'
+    );
+    $stmt->execute(['id' => $identityId]);
+    $row = $stmt->fetch();
+    if (!$row) {
+        return null;
+    }
+    return [
+        'identity_id'      => (int)$row['id'],
+        'platform'         => $row['provider'],
+        'platform_user_id' => $row['provider_user_id'],
+        'user_name'        => $row['provider_login'],
+    ];
 }
 
-/** The shop: spend watch-time coins on in-game gold. */
+/**
+ * The in-game shop: spends the bot's watch-time points on gold.
+ *
+ * Points are never held on this side - the balance and the items come from the
+ * bot, which is also what debits them.
+ */
 function handle_shop_page()
 {
     global $twig;
-    $identityId = Core\OAuth\Redirector::currentIdentityId();
-    if (!$identityId) {
+    $viewer = shop_current_viewer();
+    if (!$viewer) {
         WebService::redirect(Core\OAuth\Redirector::loginUrl());
         exit();
     }
-    $shop = new Core\Shop\ShopService();
-    $identities = new Core\IdentityRepository();
-    $worldId = Core\OAuth\Redirector::currentWorldId();
+    $bot = new Core\Bot\BotClient();
+    $catalogue = new Core\Shop\GoldCatalogue($bot);
+
+    $balance = ['points' => 0, 'currency_name' => 'pontos'];
+    $items = [];
+    $botError = null;
+    try {
+        $balance = $bot->getBalance($viewer['platform'], $viewer['platform_user_id'], $viewer['user_name']);
+        $items = $catalogue->listGoldItems();
+    } catch (Throwable $e) {
+        //The stream bot being down must not take the page with it: show what we
+        //can and say plainly that the shop is unavailable right now.
+        $botError = $e->getMessage();
+    }
 
     header('Content-Type: text/html; charset=utf-8');
     header('Cache-Control: no-store');
     echo $twig->render('shop.html.twig', [
-        'title'    => 'Shop',
-        'balance'  => $identities->getBalance($identityId),
-        'packages' => $shop->getPackages(),
-        'orders'   => $shop->getOrders($identityId),
-        'world'    => $worldId,
-        'csrf'     => shop_csrf_token(),
-        'error'    => isset($_GET['error']) ? substr((string)$_GET['error'], 0, 200) : null,
-        'bought'   => isset($_GET['bought']) ? (int)$_GET['bought'] : 0,
+        'title'     => 'Shop',
+        'balance'   => $balance['points'],
+        'currency'  => $balance['currency_name'],
+        'items'     => $items,
+        'history'   => $catalogue->recentDeliveries($viewer['identity_id']),
+        'csrf'      => shop_csrf_token(),
+        'botError'  => $botError,
+        'error'     => isset($_GET['error']) ? substr((string)$_GET['error'], 0, 200) : null,
+        'bought'    => isset($_GET['bought']) ? (int)$_GET['bought'] : 0,
     ]);
     exit();
 }
 
 function handle_shop_buy()
 {
-    $identityId = Core\OAuth\Redirector::currentIdentityId();
-    if (!$identityId) {
+    $viewer = shop_current_viewer();
+    if (!$viewer) {
         WebService::redirect(Core\OAuth\Redirector::loginUrl());
         exit();
     }
     try {
-        //Without this a third-party page could spend a signed-in player's coins
+        //Without this a third-party page could spend a signed-in player's points
         //by posting to this endpoint on their behalf.
         $given = isset($_POST['csrf']) ? (string)$_POST['csrf'] : '';
         if (!hash_equals(shop_csrf_token(), $given)) {
             throw new RuntimeException('Your session expired. Please try again.');
         }
-        $shop = new Core\Shop\ShopService();
-        $order = $shop->purchase(
-            $identityId,
-            isset($_POST['package']) ? (string)$_POST['package'] : '',
-            Core\OAuth\Redirector::currentWorldId()
-        );
-        WebService::redirect('/shop/?bought=' . (int)$order['gold_amount']);
+        $itemId = isset($_POST['item_id']) ? (int)$_POST['item_id'] : 0;
+        $bot = new Core\Bot\BotClient();
+        $catalogue = new Core\Shop\GoldCatalogue($bot);
+        $gold = $catalogue->goldFor($itemId);
+
+        //The bot debits and records the redemption in one transaction; there is
+        //nothing to undo here if the delivery below fails.
+        $bot->purchase($viewer['platform'], $viewer['platform_user_id'], $viewer['user_name'], $itemId);
+
+        //Deliver straight away so buying in-game feels immediate. If this throws,
+        //the redemption stays pending and the scheduled consumer picks it up.
+        try {
+            (new Core\Shop\RedemptionConsumer($bot))->run(50);
+        } catch (Throwable $e) {
+            error_log('redemption delivery after purchase failed: ' . $e->getMessage());
+        }
+        WebService::redirect('/shop/?bought=' . $gold);
     } catch (Throwable $e) {
         WebService::redirect('/shop/?error=' . rawurlencode($e->getMessage()));
     }
@@ -207,7 +234,6 @@ $dispatcher = FastRoute\cachedDispatcher(function (FastRoute\RouteCollector $r) 
     $r->addRoute('GET', '/shop', 'handle_shop_page');
     $r->addRoute('GET', '/shop/', 'handle_shop_page');
     $r->addRoute('POST', '/shop/buy', 'handle_shop_buy');
-    $r->addRoute('POST', '/v1/coins/{action}', 'handle_coins_api');
     $r->addRoute('GET', '/v1/oauth/{provider}/start', 'handle_oauth_start');
     $r->addRoute('GET', '/v1/oauth/{provider}/callback', 'handle_oauth_callback');
     $r->addRoute(['GET', 'POST', 'OPTIONS'], '/v1/{section}/{action}', 'handle_v1_api');

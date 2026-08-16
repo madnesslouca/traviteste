@@ -124,11 +124,11 @@
             letter-spacing: .04em;
         }
 
-        .fulfilled { background: rgba(83, 252, 24, .12); color: #8ef06a; }
+        .delivered { background: rgba(83, 252, 24, .12); color: #8ef06a; }
 
-        .refunded { background: rgba(255, 176, 86, .12); color: #ffc078; }
+        .unmatched { background: rgba(255, 176, 86, .12); color: #ffc078; }
 
-        .pending { background: rgba(145, 70, 255, .15); color: #c4a6ff; }
+        .failed { background: rgba(255, 86, 86, .12); color: #ffb0b0; }
 
         .msg {
             padding: .8rem 1rem;
@@ -139,6 +139,8 @@
 
         .msg.bad { background: rgba(255, 86, 86, .1); border: 1px solid rgba(255, 86, 86, .35); color: #ffb0b0; }
 
+        .msg.warn { background: rgba(255, 176, 86, .1); border: 1px solid rgba(255, 176, 86, .3); color: #ffc078; }
+
         .msg.good { background: rgba(83, 252, 24, .1); border: 1px solid rgba(83, 252, 24, .3); color: #a5f58a; }
 
         .empty { color: var(--muted); font-size: .9rem; }
@@ -148,9 +150,12 @@
 <div class="wrap">
     <header>
         <h1>{{ title }}</h1>
-        <div class="balance"><strong>{{ balance }}</strong> coins</div>
+        <div class="balance"><strong>{{ balance }}</strong> {{ currency }}</div>
     </header>
 
+    {% if botError %}
+        <div class="msg warn">The stream shop is unavailable right now: {{ botError }}</div>
+    {% endif %}
     {% if error %}
         <div class="msg bad">{{ error }}</div>
     {% endif %}
@@ -159,42 +164,47 @@
     {% endif %}
 
     <div class="grid">
-        {% for package in packages %}
+        {% for item in items %}
             <article class="pack">
-                <h2>{{ package.title }}</h2>
-                <div class="gold">{{ package.gold_amount }} <span>gold</span></div>
-                <div class="cost">{{ package.coin_cost }} coins</div>
+                <h2>{{ item.item_name }}</h2>
+                <div class="gold">{{ item.gold_amount }} <span>gold</span></div>
+                <div class="cost">{{ item.price }} {{ currency }}</div>
                 <form method="post" action="/shop/buy">
                     <input type="hidden" name="csrf" value="{{ csrf }}">
-                    <input type="hidden" name="package" value="{{ package.code }}">
-                    <button type="submit" {% if balance < package.coin_cost %}disabled{% endif %}>
-                        {% if balance < package.coin_cost %}Not enough coins{% else %}Exchange{% endif %}
+                    <input type="hidden" name="item_id" value="{{ item.id }}">
+                    <button type="submit" {% if balance < item.price %}disabled{% endif %}>
+                        {% if balance < item.price %}Not enough {{ currency }}{% else %}Exchange{% endif %}
                     </button>
                 </form>
             </article>
         {% endfor %}
     </div>
 
-    <h3>Recent exchanges</h3>
-    {% if orders is empty %}
-        <p class="empty">Nothing yet. Watch the stream to earn coins.</p>
+    {% if items is empty and not botError %}
+        <p class="empty">No gold packs are set up yet.</p>
+    {% endif %}
+
+    <h3>Recent deliveries</h3>
+    {% if history is empty %}
+        <p class="empty">Nothing yet. Watch the stream to earn {{ currency }}.</p>
     {% else %}
         <table>
             <thead>
             <tr>
-                <th>Package</th>
-                <th class="num">Coins</th>
+                <th>Redemption</th>
                 <th class="num">Gold</th>
                 <th>Status</th>
             </tr>
             </thead>
             <tbody>
-            {% for order in orders %}
+            {% for row in history %}
                 <tr>
-                    <td>{{ order.title }}</td>
-                    <td class="num">{{ order.coin_cost }}</td>
-                    <td class="num">{{ order.gold_amount }}</td>
-                    <td><span class="tag {{ order.status }}">{{ order.status }}</span></td>
+                    <td>#{{ row.bot_redemption_id }}</td>
+                    <td class="num">{{ row.gold_amount }}</td>
+                    <td>
+                        <span class="tag {{ row.status }}">{{ row.status }}</span>
+                        {% if row.detail %}<br><span class="empty">{{ row.detail }}</span>{% endif %}
+                    </td>
                 </tr>
             {% endfor %}
             </tbody>

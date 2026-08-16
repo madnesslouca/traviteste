@@ -1,58 +1,68 @@
--- Shop: turning watch-time coins into in-game gold.
+-- Delivering the bot's redemptions as in-game gold.
 --
--- The debit (coins, PostgreSQL) and the credit (gold, MariaDB) cannot share a
--- transaction, so every exchange is written down as an order and walked through
--- states. An order that dies half way is visible and can be settled, instead of
--- silently eating someone's coins.
+-- There is deliberately no coin ledger here. The bot owns the points: it credits
+-- watch time, it debits purchases, and it does both atomically. A second ledger
+-- on this side would be a second answer to "how many coins does this person
+-- have", and the two would drift.
+--
+-- What this side owns is the delivery: which redemption became how much gold,
+-- for which player, and whether that already happened.
 
 CREATE SCHEMA IF NOT EXISTS identity;
 
--- ---------------------------------------------------------------- packages
--- Editable without touching code: this is the price list.
-CREATE TABLE IF NOT EXISTS identity.shop_packages
+-- ---------------------------------------------------------------- gold items
+-- The bot's store items have no quantity field - only id, name, price and
+-- description - so the "how much gold is this worth" mapping lives here.
+-- Prices in points stay in the bot's store, where the streamer already edits
+-- them; this table only says what the item pays out in game.
+CREATE TABLE IF NOT EXISTS identity.gold_items
 (
-    id          BIGSERIAL PRIMARY KEY,
-    code        TEXT        NOT NULL UNIQUE,
-    title       TEXT        NOT NULL,
-    coin_cost   BIGINT      NOT NULL CHECK (coin_cost > 0),
-    gold_amount INTEGER     NOT NULL CHECK (gold_amount > 0),
-    sort_order  INTEGER     NOT NULL DEFAULT 0,
-    is_active   BOOLEAN     NOT NULL DEFAULT TRUE,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    id           BIGSERIAL PRIMARY KEY,
+    channel_name TEXT        NOT NULL,
+    bot_item_id  INTEGER     NOT NULL,
+    gold_amount  INTEGER     NOT NULL CHECK (gold_amount > 0),
+    label        TEXT        NULL,
+    is_active    BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (channel_name, bot_item_id)
 );
 
-INSERT INTO identity.shop_packages (code, title, coin_cost, gold_amount, sort_order)
-VALUES ('starter', 'Starter pouch', 100, 10, 1),
-       ('small', 'Small chest', 450, 50, 2),
-       ('medium', 'Merchant crate', 850, 100, 3),
-       ('large', 'War chest', 4000, 500, 4)
-ON CONFLICT (code) DO NOTHING;
-
--- ---------------------------------------------------------------- orders
--- pending   coins debited, gold not yet credited
--- fulfilled gold credited in the game
--- refunded  gold could not be credited, coins given back
-CREATE TABLE IF NOT EXISTS identity.shop_orders
+-- ---------------------------------------------------------------- deliveries
+-- One row per redemption we have looked at. `delivered` means the gold is in
+-- the game and the bot was told; `unmatched` means we could not find a game
+-- account for that viewer, which is a queue for a human rather than a failure
+-- to retry forever.
+CREATE TABLE IF NOT EXISTS identity.redemption_deliveries
 (
-    id              BIGSERIAL PRIMARY KEY,
-    reference       TEXT        NOT NULL UNIQUE,
-    identity_id     BIGINT      NOT NULL REFERENCES identity.oauth_identities (id) ON DELETE CASCADE,
-    package_id      BIGINT      NOT NULL REFERENCES identity.shop_packages (id),
-    world_unique_id INTEGER     NOT NULL,
-    game_uid        INTEGER     NOT NULL,
-    coin_cost       BIGINT      NOT NULL,
-    gold_amount     INTEGER     NOT NULL,
-    status          TEXT        NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'fulfilled', 'refunded')),
-    failure_reason  TEXT        NULL,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    settled_at      TIMESTAMPTZ NULL
+    id                BIGSERIAL PRIMARY KEY,
+    bot_redemption_id BIGINT      NOT NULL,
+    channel_name      TEXT        NOT NULL,
+    platform          TEXT        NULL,
+    platform_user_id  TEXT        NULL,
+    user_name         TEXT        NULL,
+    bot_item_id       INTEGER     NOT NULL,
+    gold_amount       INTEGER     NOT NULL,
+    identity_id       BIGINT      NULL REFERENCES identity.oauth_identities (id) ON DELETE SET NULL,
+    world_unique_id   INTEGER     NULL,
+    game_uid          INTEGER     NULL,
+    status            TEXT        NOT NULL DEFAULT 'delivered'
+        CHECK (status IN ('delivered', 'unmatched', 'failed')),
+    detail            TEXT        NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- A redemption is delivered at most once, no matter how often the consumer
+    -- runs or how many run at the same time.
+    UNIQUE (channel_name, bot_redemption_id)
 );
 
-CREATE INDEX IF NOT EXISTS shop_orders_identity_idx
-    ON identity.shop_orders (identity_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS redemption_deliveries_status_idx
+    ON identity.redemption_deliveries (status, created_at);
 
--- Anything still pending is an exchange that needs a human or a retry.
-CREATE INDEX IF NOT EXISTS shop_orders_pending_idx
-    ON identity.shop_orders (created_at)
-    WHERE status = 'pending';
+-- ------------------------------------------------------------ retired tables
+-- coin_ledger / coin_balances / shop_packages / shop_orders belonged to a design
+-- where this side kept its own currency. The bot already does that, better and
+-- atomically, so they are dropped rather than left behind for someone to wire
+-- back up by mistake.
+DROP VIEW IF EXISTS identity.coin_balances;
+DROP TABLE IF EXISTS identity.shop_orders;
+DROP TABLE IF EXISTS identity.shop_packages;
+DROP TABLE IF EXISTS identity.coin_ledger;

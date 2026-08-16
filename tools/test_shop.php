@@ -110,8 +110,68 @@ check('coins returned after a failed credit', $identities->getBalance($identityI
 $refunded = $shop->getOrders($identityId, 5);
 check('failed order recorded as refunded', $refunded[0]['status'], 'refunded');
 
-//Leave the world as we found it.
+// ------------------------------------------------------------- reconciliation
+//Both halves of the ambiguous case: an order stranded in `pending` where the
+//gold did land, and one where it did not. The game's credit ledger is what
+//tells them apart.
+echo "\nreconciling a stranded order whose gold DID land\n";
+$identities->linkGameAccount($identityId, $worldId, $testUid, 'shoptester' . substr($providerUserId, -4));
+$identities->addCoins($identityId, 1000, 'test_grant', 'test2:' . $providerUserId);
+
+$db = \Database\IdentityDB::getInstance();
+$landedRef = 'order:' . bin2hex(random_bytes(16));
+$package = $shop->getPackageByCode('starter');
+$db->prepare("INSERT INTO shop_orders (reference, identity_id, package_id, world_unique_id, game_uid, coin_cost, gold_amount, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, now() - interval '1 hour')")
+   ->execute([$landedRef, $identityId, $package['id'], $worldId, $testUid, $package['coin_cost'], $package['gold_amount']]);
+$identities->addCoins($identityId, -$package['coin_cost'], 'shop_purchase', $landedRef);
+//Stand in for the crash: the gold was credited, the order never settled.
+$serverDB->prepare("INSERT INTO shop_gold_credits (reference, uid, gold, time) VALUES (?, ?, ?, ?)")
+         ->execute([$landedRef, $testUid, $package['gold_amount'], time()]);
+$balanceBefore = $identities->getBalance($identityId);
+
+$report = $shop->reconcile(60);
+check('recognised as already paid', in_array($landedRef, $report['fulfilled'], true), true);
+check('coins NOT returned (player was paid)', $identities->getBalance($identityId), $balanceBefore);
+
+echo "\nreconciling a stranded order whose gold did NOT land\n";
+$lostRef = 'order:' . bin2hex(random_bytes(16));
+$db->prepare("INSERT INTO shop_orders (reference, identity_id, package_id, world_unique_id, game_uid, coin_cost, gold_amount, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, now() - interval '1 hour')")
+   ->execute([$lostRef, $identityId, $package['id'], $worldId, $testUid, $package['coin_cost'], $package['gold_amount']]);
+$identities->addCoins($identityId, -$package['coin_cost'], 'shop_purchase', $lostRef);
+$balanceBefore = $identities->getBalance($identityId);
+
+$report = $shop->reconcile(60);
+check('recognised as unpaid', in_array($lostRef, $report['refunded'], true), true);
+check('coins returned', $identities->getBalance($identityId), $balanceBefore + (int)$package['coin_cost']);
+
+echo "\nrecent orders are left alone\n";
+$freshRef = 'order:' . bin2hex(random_bytes(16));
+$db->prepare("INSERT INTO shop_orders (reference, identity_id, package_id, world_unique_id, game_uid, coin_cost, gold_amount)
+              VALUES (?, ?, ?, ?, ?, ?, ?)")
+   ->execute([$freshRef, $identityId, $package['id'], $worldId, $testUid, $package['coin_cost'], $package['gold_amount']]);
+$report = $shop->reconcile(300);
+check('in-flight purchase untouched', in_array($freshRef, $report['fulfilled'], true)
+    || in_array($freshRef, $report['refunded'], true), false);
+
+echo "\ncrediting the same reference twice\n";
+$doubleRef = 'order:' . bin2hex(random_bytes(16));
+$goldNow = (int)$serverDB->query("SELECT bought_gold FROM users WHERE id={$testUid}")->fetchColumn();
+$credit = new ReflectionMethod($shop, 'creditGold');
+$credit->setAccessible(true);
+$credit->invoke($shop, $server, $testUid, 25, $doubleRef);
+$credit->invoke($shop, $server, $testUid, 25, $doubleRef);
+$goldAfterDouble = (int)$serverDB->query("SELECT bought_gold FROM users WHERE id={$testUid}")->fetchColumn();
+check('gold credited only once', $goldAfterDouble - $goldNow, 25);
+
+//Leave both databases as we found them. Without this the throwaway identity
+//keeps its link to (world, uid 2) and the next run collides on it.
+echo "\ncleaning up\n";
+$serverDB->exec("DELETE FROM shop_gold_credits WHERE uid={$testUid}");
 $serverDB->exec("UPDATE users SET bought_gold={$goldBefore} WHERE id={$testUid}");
+$db->prepare('DELETE FROM oauth_identities WHERE id = ?')->execute([$identityId]);
+echo "  done\n";
 
 echo "\n";
 if ($failures) {

@@ -115,7 +115,7 @@ class ShopService
         //Past this point the coins are gone, so a failure has to be repaired
         //rather than thrown away.
         try {
-            $this->creditGold($server, $gameUid, (int)$package['gold_amount']);
+            $this->creditGold($server, $gameUid, (int)$package['gold_amount'], $reference);
         } catch (\Throwable $e) {
             $this->refund($order, $identityId, $package, $e->getMessage());
             throw new RuntimeException(
@@ -124,6 +124,54 @@ class ShopService
         }
 
         return $this->markFulfilled($order);
+    }
+
+    /**
+     * Settles orders left stranded in `pending`.
+     *
+     * An order is only stranded if the process died between debiting coins and
+     * recording the outcome. Which side it died on is knowable, not guessable:
+     * the game holds the order's reference if and only if the gold landed.
+     *
+     * @param int $olderThanSeconds grace period, so an in-flight purchase on
+     *                              another request is never touched
+     * @return array report: ['fulfilled' => [...], 'refunded' => [...], 'failed' => [...]]
+     */
+    public function reconcile($olderThanSeconds = 300)
+    {
+        $stmt = $this->db->prepare(
+            "SELECT * FROM shop_orders
+             WHERE status = 'pending'
+               AND created_at < now() - (:age || ' seconds')::interval
+             ORDER BY created_at"
+        );
+        $stmt->execute(['age' => $olderThanSeconds]);
+        $stranded = $stmt->fetchAll();
+
+        $report = ['fulfilled' => [], 'refunded' => [], 'failed' => []];
+        foreach ($stranded as $order) {
+            try {
+                $server = Server::getServerById((int)$order['world_unique_id']);
+                if (!$server) {
+                    throw new RuntimeException("world {$order['world_unique_id']} no longer exists");
+                }
+                if ($this->wasGoldCredited($server, $order['reference'])) {
+                    //Gold landed; only the bookkeeping was lost.
+                    $this->markFulfilled($order);
+                    $report['fulfilled'][] = $order['reference'];
+                    continue;
+                }
+                //Gold never landed, so give the coins back.
+                $package = ['coin_cost' => $order['coin_cost']];
+                $this->refund($order, (int)$order['identity_id'], $package, 'reconciled: gold was never credited');
+                $report['refunded'][] = $order['reference'];
+            } catch (\Throwable $e) {
+                //Leave it pending rather than settle it wrongly - a stuck order
+                //is recoverable, a wrong one is not.
+                $report['failed'][] = $order['reference'] . ': ' . $e->getMessage();
+            }
+        }
+        return $report;
     }
 
     private function createOrder($reference, $identityId, array $package, $worldUniqueId, $gameUid)
@@ -147,19 +195,61 @@ class ShopService
     }
 
     /**
-     * bought_gold is the transferable balance the game shows alongside
-     * gift_gold; Session::getGold() is the sum of the two.
+     * Credits gold, exactly once.
+     *
+     * The reference is written into the game database in the same transaction as
+     * the balance change, which does two things: replaying a credit becomes a
+     * no-op, and an interrupted order stops being ambiguous - if the reference is
+     * there, the player was paid.
+     *
+     * bought_gold is the transferable balance the game shows alongside gift_gold;
+     * Session::getGold() is the sum of the two.
      */
-    private function creditGold(array $server, $gameUid, $goldAmount)
+    private function creditGold(array $server, $gameUid, $goldAmount, $reference)
     {
         $serverDB = ServerDB::getInstance($server['configFileLocation']);
-        $stmt = $serverDB->prepare('UPDATE users SET bought_gold = bought_gold + :gold WHERE id = :uid');
-        $stmt->bindValue('gold', $goldAmount, PDO::PARAM_INT);
-        $stmt->bindValue('uid', $gameUid, PDO::PARAM_INT);
-        $stmt->execute();
-        if ($stmt->rowCount() < 1) {
-            throw new RuntimeException("No such player (uid {$gameUid}) in world {$server['worldId']}.");
+        $serverDB->beginTransaction();
+        try {
+            //INSERT IGNORE rather than a prior SELECT: the unique key decides,
+            //so two concurrent credits cannot both win.
+            $stmt = $serverDB->prepare(
+                'INSERT IGNORE INTO shop_gold_credits (reference, uid, gold, time)
+                 VALUES (:reference, :uid, :gold, :time)'
+            );
+            $stmt->bindValue('reference', $reference, PDO::PARAM_STR);
+            $stmt->bindValue('uid', $gameUid, PDO::PARAM_INT);
+            $stmt->bindValue('gold', $goldAmount, PDO::PARAM_INT);
+            $stmt->bindValue('time', time(), PDO::PARAM_INT);
+            $stmt->execute();
+
+            if ($stmt->rowCount() < 1) {
+                //Already credited by an earlier attempt; nothing left to do.
+                $serverDB->commit();
+                return;
+            }
+
+            $stmt = $serverDB->prepare('UPDATE users SET bought_gold = bought_gold + :gold WHERE id = :uid');
+            $stmt->bindValue('gold', $goldAmount, PDO::PARAM_INT);
+            $stmt->bindValue('uid', $gameUid, PDO::PARAM_INT);
+            $stmt->execute();
+            if ($stmt->rowCount() < 1) {
+                throw new RuntimeException("No such player (uid {$gameUid}) in world {$server['worldId']}.");
+            }
+            $serverDB->commit();
+        } catch (\Throwable $e) {
+            $serverDB->rollBack();
+            throw $e;
         }
+    }
+
+    /** True when the game already recorded this order's gold. */
+    private function wasGoldCredited(array $server, $reference)
+    {
+        $serverDB = ServerDB::getInstance($server['configFileLocation']);
+        $stmt = $serverDB->prepare('SELECT COUNT(*) FROM shop_gold_credits WHERE reference = :reference');
+        $stmt->bindValue('reference', $reference, PDO::PARAM_STR);
+        $stmt->execute();
+        return (int)$stmt->fetchColumn() > 0;
     }
 
     private function refund($order, $identityId, array $package, $reason)

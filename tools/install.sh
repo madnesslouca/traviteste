@@ -85,6 +85,15 @@ if [ "${TABLES:-0}" -lt 100 ]; then
 fi
 ok "schemas present (${TABLES} tables)"
 
+# Idempotent world migrations, applied every run so that worlds installed before
+# a migration existed pick it up too.
+for migration in tools/migrations/*.sql; do
+    [ -f "$migration" ] || continue
+    compose exec -T db mysql -uroot -proot world < "$migration" \
+        || die "migration failed: $migration"
+    ok "migration applied: $(basename "$migration")"
+done
+
 # ---------------------------------------------------------------- install
 INSTALLED=$(compose exec -T db mysql -uroot -proot -N -B -e \
     "SELECT installed FROM world.config LIMIT 1" 2>/dev/null | tr -d '\r')

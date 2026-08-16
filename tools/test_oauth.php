@@ -176,9 +176,13 @@ check('is a separate identity', $kickResult['identity_id'] !== $result['identity
 
 // ------------------------------------------------------------------- cleanup
 echo "\nCleaning up\n";
-$serverDB->exec("DELETE FROM users WHERE id={$newUid}");
+//Delete by name, never by id. An earlier version deleted WHERE id=lastInsertId(),
+//and when the insert silently failed that id was 2 - which wiped the game's
+//Multihunter account. Names here are suffixed with random bytes, so they can
+//only ever match rows this run created.
+$serverDB->exec("DELETE FROM login_handshake WHERE uid={$newUid} AND {$newUid} > 2");
+$serverDB->exec("DELETE FROM users WHERE name LIKE 'viewer{$suffix}%'");
 $serverDB->exec("DELETE FROM activation WHERE name LIKE 'viewer{$suffix}%'");
-$serverDB->exec("DELETE FROM login_handshake WHERE uid={$newUid}");
 $db = \Database\IdentityDB::getInstance();
 $db->exec("DELETE FROM oauth_identities WHERE provider_user_id IN ('tw_{$suffix}', 'kick_{$suffix}')");
 echo "  done\n";

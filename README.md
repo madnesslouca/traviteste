@@ -106,11 +106,29 @@ are returned by a compensating ledger entry.
 Balances are the **sum of a ledger**, never a mutable counter, so you can always
 answer where a coin came from.
 
+The order's reference is also written into the game database, in the same
+transaction as the gold. That makes a credit idempotent, and it makes an
+interrupted order *knowable* rather than a guess: if the game holds the
+reference, the player was paid.
+
 ```bash
-docker compose run --rm -T php php /travian/tools/test_shop.php
+# settle orders stranded by a crash mid-exchange
+docker compose run --rm -T php php /travian/tools/reconcile_orders.php --dry-run
+docker compose run --rm -T php php /travian/tools/reconcile_orders.php
 ```
 
-That exercises the refusal, purchase and refund paths against the real databases.
+Orders younger than the grace period (`--age`, 300s by default) are left alone,
+so it is safe to run while the shop is live. Anything it cannot decide stays
+pending and the command exits non-zero — a stuck order is recoverable, a wrongly
+settled one is not.
+
+```bash
+docker compose run --rm -T php php /travian/tools/test_shop.php
+docker compose run --rm -T php php /travian/tools/test_oauth.php
+```
+
+Those exercise refusal, purchase, refund and reconciliation, and the sign-in flow
+(PKCE, single-use state, registration, handshake) against the real databases.
 
 ---
 
@@ -143,9 +161,9 @@ while it is down**: no buildings finish, no troops move.
 
 ## Known gaps
 
-- The OAuth flow has not been exercised against live Twitch/Kick credentials.
-- Orders stranded in `pending` (a crash between debit and credit) have an index to
-  find them but no reconciliation command yet.
+- The token exchange and profile parsing have not been exercised against live
+  Twitch/Kick credentials. Everything after the profile is covered by tests.
+- Reconciliation is a command, not a scheduled job; nothing runs it for you.
 - The shop has no link from inside the game, and there is no logout.
 - The admin panel's "install new server" flow assumes a VPS with systemd and
   Cloudflare DNS; it does not work under Docker. Use `tools/install.sh`.

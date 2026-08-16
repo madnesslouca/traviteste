@@ -1,0 +1,34 @@
+# Secrets ------------------------------------------------------------------
+# .env holds the Twitch/Kick client secrets and the coins API token.
+.env
+.env.local
+# Written by tools/install.sh after a fresh install.
+tools/.multihunter_password
+
+# Local backups -------------------------------------------------------------
+# Copies of files taken before the repair work; local safety net, not history.
+tools/_backup_pre_fix/
+
+# Logs ----------------------------------------------------------------------
+# error_log.log reached 633 MB in this project before log deduplication.
+*.log
+*.log.tail
+main_script/copyable/include/error_log.log
+main_script_dev/copyable/include/error_log.log
+
+# Generated caches ----------------------------------------------------------
+sections/api/include/Templates/Cache/
+sections/api/include/route.cache
+main_script/copyable/include/*.pid
+main_script_dev/copyable/include/*.pid
+
+# Runtime data --------------------------------------------------------------
+main_script/copyable/backups/
+main_script_dev/copyable/backups/
+
+# OS / editor ---------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/

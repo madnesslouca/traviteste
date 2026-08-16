@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+    <style>
+        :root {
+            --bg: #0f1115;
+            --panel: #171a21;
+            --border: #262b36;
+            --text: #e8e6e3;
+            --muted: #8b93a7;
+            --gold: #f5b942;
+            --accent: #9146ff;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            padding: 2rem 1.5rem;
+            background: radial-gradient(circle at 50% 0%, #1b2030 0%, var(--bg) 55%);
+            color: var(--text);
+            font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+        }
+
+        .wrap { max-width: 54rem; margin: 0 auto; }
+
+        header {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 2rem;
+        }
+
+        h1 { margin: 0; font-size: 1.6rem; letter-spacing: -.01em; }
+
+        .balance {
+            padding: .6rem 1rem;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .balance strong { color: var(--gold); }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+            gap: 1rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .pack {
+            display: flex;
+            flex-direction: column;
+            padding: 1.25rem;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+        }
+
+        .pack h2 { margin: 0 0 .75rem; font-size: 1rem; font-weight: 600; }
+
+        .gold {
+            margin-bottom: .25rem;
+            color: var(--gold);
+            font-size: 1.6rem;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .gold span { font-size: .85rem; font-weight: 400; color: var(--muted); }
+
+        .cost {
+            margin-bottom: 1.1rem;
+            color: var(--muted);
+            font-size: .9rem;
+            font-variant-numeric: tabular-nums;
+        }
+
+        button {
+            margin-top: auto;
+            padding: .65rem 1rem;
+            border: 0;
+            border-radius: 8px;
+            background: var(--accent);
+            color: #fff;
+            font-size: .95rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        button:hover:not(:disabled) { filter: brightness(1.12); }
+
+        button:disabled { background: #2b303b; color: var(--muted); cursor: not-allowed; }
+
+        h3 {
+            margin: 0 0 .9rem;
+            font-size: .8rem;
+            text-transform: uppercase;
+            letter-spacing: .07em;
+            color: var(--muted);
+        }
+
+        table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+
+        th, td { padding: .6rem .5rem; text-align: left; border-bottom: 1px solid var(--border); }
+
+        th { color: var(--muted); font-weight: 500; font-size: .8rem; }
+
+        td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+        .tag {
+            padding: .15rem .5rem;
+            border-radius: 999px;
+            font-size: .75rem;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
+
+        .fulfilled { background: rgba(83, 252, 24, .12); color: #8ef06a; }
+
+        .refunded { background: rgba(255, 176, 86, .12); color: #ffc078; }
+
+        .pending { background: rgba(145, 70, 255, .15); color: #c4a6ff; }
+
+        .msg {
+            padding: .8rem 1rem;
+            margin-bottom: 1.5rem;
+            border-radius: 8px;
+            font-size: .93rem;
+        }
+
+        .msg.bad { background: rgba(255, 86, 86, .1); border: 1px solid rgba(255, 86, 86, .35); color: #ffb0b0; }
+
+        .msg.good { background: rgba(83, 252, 24, .1); border: 1px solid rgba(83, 252, 24, .3); color: #a5f58a; }
+
+        .empty { color: var(--muted); font-size: .9rem; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <header>
+        <h1>{{ title }}</h1>
+        <div class="balance"><strong>{{ balance }}</strong> coins</div>
+    </header>
+
+    {% if error %}
+        <div class="msg bad">{{ error }}</div>
+    {% endif %}
+    {% if bought > 0 %}
+        <div class="msg good">{{ bought }} gold added to your account.</div>
+    {% endif %}
+
+    <div class="grid">
+        {% for package in packages %}
+            <article class="pack">
+                <h2>{{ package.title }}</h2>
+                <div class="gold">{{ package.gold_amount }} <span>gold</span></div>
+                <div class="cost">{{ package.coin_cost }} coins</div>
+                <form method="post" action="/shop/buy">
+                    <input type="hidden" name="csrf" value="{{ csrf }}">
+                    <input type="hidden" name="package" value="{{ package.code }}">
+                    <button type="submit" {% if balance < package.coin_cost %}disabled{% endif %}>
+                        {% if balance < package.coin_cost %}Not enough coins{% else %}Exchange{% endif %}
+                    </button>
+                </form>
+            </article>
+        {% endfor %}
+    </div>
+
+    <h3>Recent exchanges</h3>
+    {% if orders is empty %}
+        <p class="empty">Nothing yet. Watch the stream to earn coins.</p>
+    {% else %}
+        <table>
+            <thead>
+            <tr>
+                <th>Package</th>
+                <th class="num">Coins</th>
+                <th class="num">Gold</th>
+                <th>Status</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for order in orders %}
+                <tr>
+                    <td>{{ order.title }}</td>
+                    <td class="num">{{ order.coin_cost }}</td>
+                    <td class="num">{{ order.gold_amount }}</td>
+                    <td><span class="tag {{ order.status }}">{{ order.status }}</span></td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+</div>
+</body>
+</html>

@@ -1,0 +1,10 @@
+services:
+  db:
+    build: {network: host}
+  php:
+    build: {network: host}
+  engine:
+    build: {network: host}
+  identity_db:
+    ports: !override
+      - "15432:5432"
